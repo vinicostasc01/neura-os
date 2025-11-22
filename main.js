@@ -12,6 +12,44 @@ let focusTimerId = null;
 let focusRemaining = 0;
 
 
+
+// ===== BACKEND API (NEURA OS) =====
+const API_BASE = "https://neura-os-backend.onrender.com";
+
+async function apiGet(path) {
+  const res = await fetch(`${API_BASE}${path}`);
+  if (!res.ok) {
+    throw new Error(`API GET ${path} falhou com status ${res.status}`);
+  }
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    throw new Error(`API POST ${path} falhou com status ${res.status}`);
+  }
+  return res.json();
+}
+
+async function apiPatch(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : null,
+  });
+  if (!res.ok) {
+    throw new Error(`API PATCH ${path} falhou com status ${res.status}`);
+  }
+  return res.json();
+}
+
+// ===== FIM BACKEND API =====
+
 // Tema (dark / light)
 function applyTheme(theme) {
   const root = document.documentElement;
@@ -791,6 +829,348 @@ function renderPsychInsights() {
     list.appendChild(li);
   }
 }
+
+
+// ===== OVERRIDES COM BACKEND =====
+
+// Energy form integrado ao backend
+function setupEnergyForm() {
+  const form = $("#energy-form");
+  if (!form) return;
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const sleep = parseFloat($("#sleep-hours")?.value || "0");
+    const training = parseFloat($("#training-level")?.value || "0");
+    const focus = parseFloat($("#focus-level")?.value || "0");
+    const nutrition = parseFloat($("#nutrition-level")?.value || "0");
+
+    try {
+      const data = await apiPost("/api/energy/calculate", {
+        sleep,
+        training,
+        focus,
+        nutrition,
+      });
+      const energy = data && typeof data.energy === "number" ? data.energy : null;
+      state.energy = energy;
+      updateEnergyUI();
+
+      const summary = $("#prod-energy-summary");
+      if (summary && energy != null) {
+        const label = data && data.label ? data.label : "";
+        summary.textContent = `Sua energia hoje está em ${energy}/100. ${label}`;
+      }
+    } catch (err) {
+      console.error("Erro ao calcular energia no backend, usando fallback local.", err);
+      const energy = calculateEnergy({ sleep, training, focus, nutrition });
+      state.energy = energy;
+      updateEnergyUI();
+    }
+
+    renderMiniTaskMap();
+    renderPsychInsights();
+  });
+}
+
+// Tarefas integradas ao backend
+async function syncTasksFromBackend() {
+  try {
+    const tasks = await apiGet("/api/tasks");
+    if (Array.isArray(tasks)) {
+      state.tasks = tasks;
+    }
+  } catch (err) {
+    console.error("Erro ao carregar tarefas do backend.", err);
+  }
+}
+
+function setupTasks() {
+  const form = $("#task-form");
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const title = $("#task-title").value.trim();
+      const urgency = parseInt($("#task-urgency").value || "0", 10);
+      const effort = parseInt($("#task-effort").value || "0", 10);
+      const impact = parseInt($("#task-impact").value || "0", 10);
+      const date = $("#task-date").value || null;
+      const time = $("#task-time").value || null;
+      const category = $("#task-category").value || "pessoal";
+
+      if (!title) return;
+
+      const payload = { title, urgency, effort, impact, date, time, category };
+
+      try {
+        const created = await apiPost("/api/tasks", payload);
+        state.tasks.unshift(created);
+        if (state.tasks.length > 40) state.tasks.length = 40;
+      } catch (err) {
+        console.error("Erro ao criar tarefa no backend, usando fallback local.", err);
+        const weight = Math.round((urgency + effort + impact) / 3);
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        state.tasks.unshift({
+          id,
+          title,
+          urgency,
+          effort,
+          impact,
+          weight,
+          date,
+          time,
+          category,
+          done: false,
+        });
+        if (state.tasks.length > 40) state.tasks.length = 40;
+      }
+
+      form.reset();
+      renderTaskList();
+      renderTaskMap();
+      renderMiniTaskMap();
+      renderPsychInsights();
+    });
+  }
+
+  // Carrega tarefas existentes
+  syncTasksFromBackend().then(() => {
+    renderTaskList();
+    renderTaskMap();
+    renderMiniTaskMap();
+    renderPsychInsights();
+  });
+}
+
+// Lista de tarefas com toggle integrado ao backend
+function renderTaskList() {
+  const list = $("#task-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!state.tasks.length) {
+    const li = document.createElement("li");
+    li.className = "list-item";
+    li.textContent =
+      "Nenhuma tarefa cadastrada ainda. Comece adicionando algo que você precisa fazer hoje.";
+    list.appendChild(li);
+    return;
+  }
+
+  state.tasks.forEach((task) => {
+    const li = document.createElement("li");
+    li.className = "task-item";
+
+    const main = document.createElement("div");
+    main.className = "task-main";
+    const tTitle = document.createElement("div");
+    tTitle.className = "task-title";
+    tTitle.textContent = task.title;
+    if (task.done) {
+      tTitle.style.opacity = "0.5";
+      tTitle.style.textDecoration = "line-through";
+    }
+    const meta = document.createElement("div");
+    meta.className = "task-meta";
+    const deadline =
+      task.date || task.time
+        ? `Prazo: ${task.date || ""} ${task.time || ""}`.trim()
+        : "Sem prazo";
+    meta.textContent = `${deadline} · ${task.category}`;
+    main.appendChild(tTitle);
+    main.appendChild(meta);
+
+    const tags = document.createElement("div");
+    tags.className = "task-tags";
+
+    const tagUrg = document.createElement("span");
+    tagUrg.className = "tag" + (task.urgency >= 7 ? " tag-urgent" : "");
+    tagUrg.textContent = `Urgência ${task.urgency}`;
+
+    const tagEff = document.createElement("span");
+    tagEff.className = "tag";
+    tagEff.textContent = `Esforço ${task.effort}`;
+
+    const tagImp = document.createElement("span");
+    tagImp.className = "tag";
+    tagImp.textContent = `Impacto ${task.impact}`;
+
+    const tagWeight = document.createElement("span");
+    tagWeight.className = "tag tag-weight";
+    tagWeight.textContent = `Peso ${task.weight}`;
+
+    tags.appendChild(tagUrg);
+    tags.appendChild(tagEff);
+    tags.appendChild(tagImp);
+    tags.appendChild(tagWeight);
+
+    const actions = document.createElement("div");
+    actions.className = "task-actions";
+    const toggleBtn = document.createElement("button");
+    toggleBtn.className = "btn-ghost";
+    toggleBtn.textContent = task.done ? "Reabrir" : "Concluir";
+    toggleBtn.addEventListener("click", async () => {
+      const original = task.done;
+      task.done = !task.done;
+      renderTaskList();
+      renderMiniTaskMap();
+      renderPsychInsights();
+
+      try {
+        if (task.id) {
+          await apiPatch(`/api/tasks/${encodeURIComponent(task.id)}/toggle`);
+        }
+      } catch (err) {
+        console.error("Erro ao alternar tarefa no backend, revertendo estado local.", err);
+        task.done = original;
+        renderTaskList();
+        renderMiniTaskMap();
+        renderPsychInsights();
+      }
+    });
+    actions.appendChild(toggleBtn);
+
+    li.appendChild(main);
+    li.appendChild(tags);
+    li.appendChild(actions);
+    list.appendChild(li);
+  });
+}
+
+// Focus sessions integradas ao backend
+async function syncFocusSessionsFromBackend() {
+  try {
+    const sessions = await apiGet("/api/focus-sessions");
+    if (Array.isArray(sessions)) {
+      state.focusSessions = sessions;
+    }
+  } catch (err) {
+    console.error("Erro ao carregar sessões de foco do backend.", err);
+  }
+}
+
+async function registerFocusSession(title, minutes) {
+  const energyStart = state.energy == null ? null : state.energy;
+
+  try {
+    const created = await apiPost("/api/focus-sessions", {
+      title,
+      minutes,
+      energyStart,
+    });
+    state.focusSessions.unshift(created);
+    if (state.focusSessions.length > 20) state.focusSessions.length = 20;
+  } catch (err) {
+    console.error("Erro ao registrar sessão de foco no backend, usando fallback local.", err);
+    const energyEnd =
+      energyStart == null ? null : Math.max(0, Math.min(100, energyStart - minutes * 0.25));
+
+    state.focusSessions.unshift({
+      title,
+      minutes,
+      energyStart,
+      energyEnd,
+      date: new Date().toISOString(),
+    });
+    if (state.focusSessions.length > 20) state.focusSessions.length = 20;
+  }
+
+  if (minutes >= 25) {
+    shiftMood(1);
+  } else if (minutes >= 10) {
+    shiftMood(0);
+  } else {
+    shiftMood(-1);
+  }
+
+  renderFocusHistory();
+  renderMoodLines();
+  renderPsychInsights();
+}
+
+// Psicólogo integrado ao backend
+function setupPsychologist() {
+  const log = $("#psych-log");
+  const form = $("#psych-form");
+  const input = $("#psych-message");
+  if (!log || !form || !input) return;
+
+  appendPsychMessage(
+    "bot",
+    "Olá, eu sou o Psicólogo do NEURA OS. Me conte brevemente como você está e o que está pegando hoje que eu interpreto dentro do contexto de energia, foco e tarefas."
+  );
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    appendPsychMessage("user", text);
+    input.value = "";
+    input.focus();
+
+    try {
+      const data = await apiPost("/api/psychologist/message", {
+        text,
+        energy: state.energy,
+      });
+      const reply =
+        data && data.reply
+          ? data.reply
+          : "Não consegui acessar o módulo de psicólogo agora, mas tente escolher um próximo passo pequeno e concreto para hoje.";
+      appendPsychMessage("bot", reply);
+    } catch (err) {
+      console.error("Erro no psicólogo backend.", err);
+      appendPsychMessage(
+        "bot",
+        "Tive um problema técnico para interpretar com o módulo de psicólogo agora. Mas lembre-se: reduza a autocobrança e escolha uma única tarefa viável para concluir hoje."
+      );
+    }
+
+    renderPsychInsights();
+  });
+}
+
+// Integração simples com endpoint mock de Google Fit / Mi Band
+function setupGoogleFitBackend() {
+  const btn = document.getElementById("fit-simulate-btn");
+  if (!btn) return;
+
+  btn.addEventListener("click", async () => {
+    try {
+      const data = await apiGet("/api/google-fit/mock");
+      console.log("Google Fit (mock)", data);
+
+      const sleepInput = document.getElementById("sleep-hours");
+      if (sleepInput && typeof data.sleepHours === "number") {
+        sleepInput.value = data.sleepHours.toFixed(1);
+      }
+
+      const info = document.getElementById("fit-last-sync");
+      if (info) {
+        info.textContent = `BPM ${data.heartRate} · Sono ${data.sleepHours}h · Passos ${data.steps}`;
+      }
+    } catch (err) {
+      console.error("Erro ao consultar Google Fit mock.", err);
+    }
+  });
+}
+
+// Inicialização extra para carregar dados do backend
+document.addEventListener("DOMContentLoaded", () => {
+  syncTasksFromBackend()
+    .then(renderTaskList)
+    .catch(() => {});
+  syncFocusSessionsFromBackend()
+    .then(() => {
+      renderFocusHistory();
+      renderMoodLines();
+      renderPsychInsights();
+    })
+    .catch(() => {});
+  setupGoogleFitBackend();
+});
+
+// ===== FIM OVERRIDES BACKEND =====
 
 // Inicialização
 document.addEventListener("DOMContentLoaded", () => {
